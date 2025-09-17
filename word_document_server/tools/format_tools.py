@@ -190,13 +190,8 @@ async def create_custom_style(filename: str, style_name: str,
 
 
 async def apply_inline_styles(filename: str, paragraph_index: int, segments: List[Dict[str, Any]]) -> str:
-    """Apply inline bold/italic formatting to specific segments within a paragraph.
+    """Apply inline formatting, hyperlinks, math styling, and footnotes to a paragraph."""
 
-    Args:
-        filename: Path to the Word document
-        paragraph_index: Index of the paragraph (0-based)
-        segments: List of dictionaries with keys start, end, bold, italic
-    """
     filename = ensure_docx_extension(filename)
 
     try:
@@ -214,57 +209,104 @@ async def apply_inline_styles(filename: str, paragraph_index: int, segments: Lis
     if not is_writeable:
         return f"Cannot modify document: {error_message}. Consider creating a copy first."
 
+    if len(segments) == 0:
+        return "No formatting segments provided"
+
     try:
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        from docx.opc.constants import RELATIONSHIP_TYPE
+        from docx.text.run import Run
+
         doc = Document(filename)
         if paragraph_index < 0 or paragraph_index >= len(doc.paragraphs):
             return f"Invalid paragraph index. Document has {len(doc.paragraphs)} paragraphs (0-{len(doc.paragraphs)-1})."
 
         paragraph = doc.paragraphs[paragraph_index]
-        text = paragraph.text
 
-        if len(segments) == 0:
-            return "No formatting segments provided"
-
-        # Normalize and sort segments by start position
-        normalized_segments = []
-        for seg in segments:
-            try:
-                start = int(seg.get('start'))
-                end = int(seg.get('end'))
-            except (ValueError, TypeError):
-                return "Segment start and end must be integers"
-            if start < 0 or end > len(text) or start >= end:
-                return f"Invalid segment positions: start={start}, end={end}, paragraph length={len(text)}"
-            normalized_segments.append({
-                'start': start,
-                'end': end,
-                'bold': bool(seg.get('bold')) if seg.get('bold') is not None else False,
-                'italic': bool(seg.get('italic')) if seg.get('italic') is not None else False,
-            })
-
-        normalized_segments.sort(key=lambda s: s['start'])
-
-        # Remove existing runs by clearing paragraph text and rebuilding
+        # Clear existing runs
         while paragraph.runs:
             run = paragraph.runs[0]
             run._element.getparent().remove(run._element)
 
-        cursor = 0
-        for seg in normalized_segments:
-            if seg['start'] > cursor:
-                paragraph.add_run(text[cursor:seg['start']])
-            run = paragraph.add_run(text[seg['start']:seg['end']])
-            run.bold = seg['bold'] or None
-            run.italic = seg['italic'] or None
-            cursor = seg['end']
+        footnote_placeholders: List[Dict[str, str]] = []
 
-        if cursor < len(text):
-            paragraph.add_run(text[cursor:])
+        def add_hyperlink(paragraph, text: str, url: str) -> Run:
+            part = paragraph.part
+            rel_id = part.relate_to(url, RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
+            hyperlink = OxmlElement('w:hyperlink')
+            hyperlink.set(qn('r:id'), rel_id)
+
+            new_run = OxmlElement('w:r')
+            r_pr = OxmlElement('w:rPr')
+            color = OxmlElement('w:color')
+            color.set(qn('w:val'), '0563C1')
+            underline = OxmlElement('w:u')
+            underline.set(qn('w:val'), 'single')
+            r_pr.append(color)
+            r_pr.append(underline)
+            new_run.append(r_pr)
+
+            text_elem = OxmlElement('w:t')
+            text_elem.text = text
+            new_run.append(text_elem)
+
+            hyperlink.append(new_run)
+            paragraph._p.append(hyperlink)
+            return Run(new_run, paragraph)
+
+        for idx, segment in enumerate(segments):
+            text = str(segment.get('text', '') or '')
+            run = None
+
+            link_url = segment.get('link_url')
+            if link_url:
+                run = add_hyperlink(paragraph, text, link_url)
+            else:
+                run = paragraph.add_run(text)
+
+            if segment.get('bold'):
+                run.bold = True
+            if segment.get('italic'):
+                run.italic = True
+
+            if segment.get('math_expression'):
+                run.font.name = 'Cambria Math'
+                r_pr = run._element.get_or_add_rPr()
+                r_fonts = r_pr.find(qn('w:rFonts'))
+                if r_fonts is None:
+                    r_fonts = OxmlElement('w:rFonts')
+                    r_pr.append(r_fonts)
+                r_fonts.set(qn('w:ascii'), 'Cambria Math')
+                r_fonts.set(qn('w:hAnsi'), 'Cambria Math')
+
+            footnote_text = segment.get('footnote_text')
+            if footnote_text:
+                placeholder = segment.get('footnote_id') or f"[[DOCB_FN_{idx}]]"
+                run.text = f"{run.text or ''}{placeholder}"
+                footnote_placeholders.append({
+                    'placeholder': placeholder,
+                    'text': footnote_text,
+                })
 
         doc.save(filename)
+
+        # Apply footnotes using placeholders then remove placeholders
+        if footnote_placeholders:
+            from word_document_server.tools.footnote_tools import add_footnote_after_text
+            from word_document_server.tools.content_tools import search_and_replace
+
+            for item in footnote_placeholders:
+                result = await add_footnote_after_text(filename, item['placeholder'], item['text'])
+                if isinstance(result, str) and result.lower().startswith('failed'):
+                    return result
+                cleanup = await search_and_replace(filename, item['placeholder'], "")
+                if isinstance(cleanup, str) and cleanup.lower().startswith('failed'):
+                    return cleanup
+
         return f"Applied inline formatting to paragraph {paragraph_index}"
-    except Exception as e:
-        return f"Failed to apply inline formatting: {str(e)}"
+    except Exception as exc:
+        return f"Failed to apply inline formatting: {str(exc)}"
 
 
 async def format_table(filename: str, table_index: int, 
@@ -309,6 +351,43 @@ async def format_table(filename: str, table_index: int,
             return f"Failed to format table at index {table_index}."
     except Exception as e:
         return f"Failed to format table: {str(e)}"
+
+
+async def insert_horizontal_rule(filename: str) -> str:
+    """Insert a horizontal rule by applying a bottom border to a blank paragraph."""
+
+    filename = ensure_docx_extension(filename)
+
+    if not os.path.exists(filename):
+        return f"Document {filename} does not exist"
+
+    is_writeable, error_message = check_file_writeable(filename)
+    if not is_writeable:
+        return f"Cannot modify document: {error_message}. Consider creating a copy first."
+
+    try:
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+
+        doc = Document(filename)
+        paragraph = doc.add_paragraph()
+        p = paragraph._p
+        pPr = p.get_or_add_pPr()
+        pBdr = OxmlElement('w:pBdr')
+
+        bottom = OxmlElement('w:bottom')
+        bottom.set(qn('w:val'), 'single')
+        bottom.set(qn('w:sz'), '6')
+        bottom.set(qn('w:space'), '1')
+        bottom.set(qn('w:color'), 'auto')
+
+        pBdr.append(bottom)
+        pPr.append(pBdr)
+
+        doc.save(filename)
+        return "Inserted horizontal rule"
+    except Exception as exc:
+        return f"Failed to insert horizontal rule: {str(exc)}"
 
 
 async def set_table_cell_shading(filename: str, table_index: int, row_index: int, 

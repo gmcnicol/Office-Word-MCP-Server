@@ -202,7 +202,12 @@ def register_tools():
     def apply_inline_styles(filename: str, paragraph_index: int, segments: list):
         """Apply inline bold/italic formatting to specific ranges within a paragraph."""
         return format_tools.apply_inline_styles(filename, paragraph_index, segments)
-    
+
+    @mcp.tool()
+    def insert_horizontal_rule(filename: str):
+        """Insert a horizontal rule separator at the end of the document."""
+        return format_tools.insert_horizontal_rule(filename)
+
     @mcp.tool()
     def format_table(filename: str, table_index: int, has_header_row: bool = None,
                     border_style: str = None, shading: list = None):

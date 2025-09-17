@@ -21,7 +21,7 @@ from word_document_server.tools.content_tools import (
 
 # Format tools
 from word_document_server.tools.format_tools import (
-    format_text, create_custom_style, format_table, apply_inline_styles
+    format_text, create_custom_style, format_table, apply_inline_styles, insert_horizontal_rule
 )
 
 # Protection tools

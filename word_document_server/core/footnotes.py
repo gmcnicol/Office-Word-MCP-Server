@@ -6,6 +6,7 @@ This module combines all footnote implementations with proper namespace handling
 import os
 import zipfile
 import tempfile
+from copy import deepcopy
 from typing import Optional, Tuple, Dict, Any, List
 from lxml import etree
 from docx import Document
@@ -341,6 +342,8 @@ def add_footnote_robust(
         # Find target location
         nsmap = {'w': W_NS}
         
+        insert_pos = None
+
         if search_text:
             # Search for text in paragraphs
             found = False
@@ -350,46 +353,67 @@ def add_footnote_robust(
                     target_para = para
                     found = True
                     break
-            
+
             if not found:
                 return False, f"Text '{search_text}' not found in document", None
+
+            # Locate placeholder within runs to determine exact insertion point
+            runs = target_para.xpath('.//w:r', namespaces=nsmap)
+            for run in runs:
+                texts = run.xpath('.//w:t', namespaces=nsmap)
+                if not texts:
+                    continue
+                text_node = texts[0]
+                text_value = text_node.text or ''
+                if search_text in text_value:
+                    before, after = text_value.split(search_text, 1)
+                    text_node.text = before
+                    if after:
+                        new_run = deepcopy(run)
+                        new_text_nodes = new_run.xpath('.//w:t', namespaces=nsmap)
+                        if new_text_nodes:
+                            new_text_nodes[0].text = after
+                        target_para.insert(target_para.index(run) + 1, new_run)
+                    insert_pos = target_para.index(run) + 1
+                    break
+
+            if insert_pos is None:
+                return False, f"Placeholder '{search_text}' not found in paragraph", None
         else:
             # Use paragraph index
             paragraphs = doc_root.xpath('//w:p', namespaces=nsmap)
             if paragraph_index >= len(paragraphs):
                 return False, f"Paragraph index {paragraph_index} out of range", None
             target_para = paragraphs[paragraph_index]
-        
-        # Validate location if requested
-        if validate_location:
-            # Check if paragraph is in header/footer
-            parent = target_para.getparent()
-            while parent is not None:
-                if parent.tag in [f'{{{W_NS}}}hdr', f'{{{W_NS}}}ftr']:
-                    return False, "Cannot add footnote in header/footer", None
-                parent = parent.getparent()
+
+            # Validate location if requested
+            if validate_location:
+                # Check if paragraph is in header/footer
+                parent = target_para.getparent()
+                while parent is not None:
+                    if parent.tag in [f'{{{W_NS}}}hdr', f'{{{W_NS}}}ftr']:
+                        return False, "Cannot add footnote in header/footer", None
+                    parent = parent.getparent()
         
         # Get safe footnote ID
         footnote_id = _get_safe_footnote_id(footnotes_root)
         
         # Add footnote reference to document
-        if position == "after":
-            # Find last run in paragraph or create one
-            runs = target_para.xpath('.//w:r', namespaces=nsmap)
-            if runs:
-                last_run = runs[-1]
-                # Insert after last run
-                insert_pos = target_para.index(last_run) + 1
-            else:
-                insert_pos = len(target_para)
-        else:  # before
-            # Find first run with text
-            runs = target_para.xpath('.//w:r[w:t]', namespaces=nsmap)
-            if runs:
-                first_run = runs[0]
-                insert_pos = target_para.index(first_run)
-            else:
-                insert_pos = 0
+        if insert_pos is None:
+            if position == "after":
+                runs = target_para.xpath('.//w:r', namespaces=nsmap)
+                if runs:
+                    last_run = runs[-1]
+                    insert_pos = target_para.index(last_run) + 1
+                else:
+                    insert_pos = len(target_para)
+            else:  # before
+                runs = target_para.xpath('.//w:r[w:t]', namespaces=nsmap)
+                if runs:
+                    first_run = runs[0]
+                    insert_pos = target_para.index(first_run)
+                else:
+                    insert_pos = 0
         
         # Create footnote reference run
         ref_run = etree.Element(f'{{{W_NS}}}r')
