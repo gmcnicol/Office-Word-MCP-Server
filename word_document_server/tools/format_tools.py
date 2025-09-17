@@ -189,6 +189,84 @@ async def create_custom_style(filename: str, style_name: str,
         return f"Failed to create style: {str(e)}"
 
 
+async def apply_inline_styles(filename: str, paragraph_index: int, segments: List[Dict[str, Any]]) -> str:
+    """Apply inline bold/italic formatting to specific segments within a paragraph.
+
+    Args:
+        filename: Path to the Word document
+        paragraph_index: Index of the paragraph (0-based)
+        segments: List of dictionaries with keys start, end, bold, italic
+    """
+    filename = ensure_docx_extension(filename)
+
+    try:
+        paragraph_index = int(paragraph_index)
+    except (ValueError, TypeError):
+        return "Invalid parameter: paragraph_index must be an integer"
+
+    if not isinstance(segments, list):
+        return "Invalid parameter: segments must be a list"
+
+    if not os.path.exists(filename):
+        return f"Document {filename} does not exist"
+
+    is_writeable, error_message = check_file_writeable(filename)
+    if not is_writeable:
+        return f"Cannot modify document: {error_message}. Consider creating a copy first."
+
+    try:
+        doc = Document(filename)
+        if paragraph_index < 0 or paragraph_index >= len(doc.paragraphs):
+            return f"Invalid paragraph index. Document has {len(doc.paragraphs)} paragraphs (0-{len(doc.paragraphs)-1})."
+
+        paragraph = doc.paragraphs[paragraph_index]
+        text = paragraph.text
+
+        if len(segments) == 0:
+            return "No formatting segments provided"
+
+        # Normalize and sort segments by start position
+        normalized_segments = []
+        for seg in segments:
+            try:
+                start = int(seg.get('start'))
+                end = int(seg.get('end'))
+            except (ValueError, TypeError):
+                return "Segment start and end must be integers"
+            if start < 0 or end > len(text) or start >= end:
+                return f"Invalid segment positions: start={start}, end={end}, paragraph length={len(text)}"
+            normalized_segments.append({
+                'start': start,
+                'end': end,
+                'bold': bool(seg.get('bold')) if seg.get('bold') is not None else False,
+                'italic': bool(seg.get('italic')) if seg.get('italic') is not None else False,
+            })
+
+        normalized_segments.sort(key=lambda s: s['start'])
+
+        # Remove existing runs by clearing paragraph text and rebuilding
+        while paragraph.runs:
+            run = paragraph.runs[0]
+            run._element.getparent().remove(run._element)
+
+        cursor = 0
+        for seg in normalized_segments:
+            if seg['start'] > cursor:
+                paragraph.add_run(text[cursor:seg['start']])
+            run = paragraph.add_run(text[seg['start']:seg['end']])
+            run.bold = seg['bold'] or None
+            run.italic = seg['italic'] or None
+            cursor = seg['end']
+
+        if cursor < len(text):
+            paragraph.add_run(text[cursor:])
+
+        doc.save(filename)
+        return f"Applied inline formatting to paragraph {paragraph_index}"
+    except Exception as e:
+        return f"Failed to apply inline formatting: {str(e)}"
+
+
 async def format_table(filename: str, table_index: int, 
                       has_header_row: Optional[bool] = None,
                       border_style: Optional[str] = None,

@@ -197,6 +197,11 @@ def register_tools():
             filename, paragraph_index, start_pos, end_pos, bold, italic, 
             underline, color, font_size, font_name
         )
+
+    @mcp.tool()
+    def apply_inline_styles(filename: str, paragraph_index: int, segments: list):
+        """Apply inline bold/italic formatting to specific ranges within a paragraph."""
+        return format_tools.apply_inline_styles(filename, paragraph_index, segments)
     
     @mcp.tool()
     def format_table(filename: str, table_index: int, has_header_row: bool = None,
