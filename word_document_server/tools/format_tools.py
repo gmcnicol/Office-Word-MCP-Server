@@ -20,6 +20,7 @@ from word_document_server.core.tables import (
     set_column_widths, set_table_width as set_table_width_func, auto_fit_table,
     format_cell_text_by_position, set_cell_padding_by_position
 )
+from word_document_server.tools.footnote_tools import add_footnote_robust_tool
 
 
 async def format_text(filename: str, paragraph_index: int, start_pos: int, end_pos: int, 
@@ -229,7 +230,7 @@ async def apply_inline_styles(filename: str, paragraph_index: int, segments: Lis
             run = paragraph.runs[0]
             run._element.getparent().remove(run._element)
 
-        footnote_placeholders: List[Dict[str, str]] = []
+        footnote_requests: List[Dict[str, str]] = []
 
         def add_hyperlink(paragraph, text: str, url: str) -> Run:
             part = paragraph.part
@@ -284,25 +285,25 @@ async def apply_inline_styles(filename: str, paragraph_index: int, segments: Lis
             if footnote_text:
                 placeholder = segment.get('footnote_id') or f"[[DOCB_FN_{idx}]]"
                 run.text = f"{run.text or ''}{placeholder}"
-                footnote_placeholders.append({
+                footnote_requests.append({
                     'placeholder': placeholder,
                     'text': footnote_text,
                 })
 
         doc.save(filename)
 
-        # Apply footnotes using placeholders then remove placeholders
-        if footnote_placeholders:
-            from word_document_server.tools.footnote_tools import add_footnote_after_text
-            from word_document_server.tools.content_tools import search_and_replace
-
-            for item in footnote_placeholders:
-                result = await add_footnote_after_text(filename, item['placeholder'], item['text'])
-                if isinstance(result, str) and result.lower().startswith('failed'):
-                    return result
-                cleanup = await search_and_replace(filename, item['placeholder'], "")
-                if isinstance(cleanup, str) and cleanup.lower().startswith('failed'):
-                    return cleanup
+        # Translate placeholders into real footnotes
+        if footnote_requests:
+            for item in footnote_requests:
+                result = await add_footnote_robust_tool(
+                    filename=filename,
+                    search_text=item['placeholder'],
+                    footnote_text=item['text'],
+                    validate_location=False,
+                )
+                if not isinstance(result, dict) or not result.get('success'):
+                    message = result.get('message') if isinstance(result, dict) else str(result)
+                    return f"Failed to add footnote: {message}"
 
         return f"Applied inline formatting to paragraph {paragraph_index}"
     except Exception as exc:
